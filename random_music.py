@@ -27,6 +27,7 @@ from ytmusicapi import YTMusic
 
 APP_DIR = Path(__file__).resolve().parent
 INDEX_PATH = APP_DIR / "index.html"
+JELLY_PATH = APP_DIR / "vendor" / "jelly.js"
 APP_NAME = "YouTube Music Randomizer"
 APP_VERSION = "0.1.0"
 MUSICBRAINZ_URL = "https://musicbrainz.org/ws/2/recording/"
@@ -480,6 +481,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._send_json({"status": "ok"})
             return
+        if path == "/vendor/jelly.js":
+            self._send_asset(JELLY_PATH, "application/javascript; charset=utf-8")
+            return
         if path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
@@ -569,6 +573,20 @@ class AppHandler(BaseHTTPRequestHandler):
             "https://i.ytimg.com; connect-src 'self'; "
             "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_asset(self, file_path: Path, content_type: str) -> None:
+        try:
+            body = file_path.read_bytes()
+        except OSError:
+            self._send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 

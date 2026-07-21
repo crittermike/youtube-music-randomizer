@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy only what the server needs at runtime.
 COPY random_music.py index.html ./
+COPY vendor ./vendor
 
 # Run as an unprivileged user.
 RUN useradd --create-home --uid 10001 appuser \
