@@ -1,0 +1,2 @@
+ytmusicapi>=1.10,<2
+urllib3<2
