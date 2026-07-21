@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
 import threading
@@ -476,6 +477,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._send_html()
             return
+        if path == "/healthz":
+            self._send_json({"status": "ok"})
+            return
         if path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
@@ -483,7 +487,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if not self._origin_is_local():
+        if not self._origin_is_allowed():
             self._send_json({"error": "Forbidden origin."}, HTTPStatus.FORBIDDEN)
             return
 
@@ -512,11 +516,16 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
-    def _origin_is_local(self) -> bool:
+    def _origin_is_allowed(self) -> bool:
         origin = self.headers.get("Origin")
         if not origin:
             return True
         parsed = urlparse(origin)
+        # Same-origin: the browser Origin host matches the Host we served from.
+        # This covers HTTPS deployments (e.g. Fly) without hardcoding the domain.
+        host_header = self.headers.get("Host", "")
+        if parsed.netloc and parsed.netloc == host_header:
+            return True
         return parsed.scheme == "http" and parsed.hostname in {
             "127.0.0.1",
             "localhost",
@@ -580,12 +589,13 @@ class AppHandler(BaseHTTPRequestHandler):
             super().log_message(format_string, *args)
 
 
-def run_server(port: int, open_browser: bool) -> None:
+def run_server(host: str, port: int, open_browser: bool) -> None:
     if not INDEX_PATH.exists():
         raise SystemExit(f"Missing UI file: {INDEX_PATH}")
-    address = ("127.0.0.1", port)
+    address = (host, port)
     server = ThreadingHTTPServer(address, AppHandler)
-    url = f"http://127.0.0.1:{server.server_port}"
+    display_host = "127.0.0.1" if host in {"0.0.0.0", ""} else host
+    url = f"http://{display_host}:{server.server_port}"
     print(f"{APP_NAME} is running at {url}")
     print("Press Control-C to stop it.")
     if open_browser:
@@ -605,7 +615,17 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve_parser = subparsers.add_parser("serve", help="Start the local web app.")
-    serve_parser.add_argument("--port", type=int, default=8787)
+    serve_parser.add_argument(
+        "--host",
+        default=os.environ.get("HOST", "127.0.0.1"),
+        help="Interface to bind (default 127.0.0.1, or $HOST).",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("PORT", "8787")),
+        help="Port to listen on (default 8787, or $PORT).",
+    )
     serve_parser.add_argument(
         "--no-browser",
         action="store_true",
@@ -618,7 +638,7 @@ def main() -> None:
     args = build_parser().parse_args()
     if not 1 <= args.port <= 65_535:
         raise SystemExit("Port must be between 1 and 65535.")
-    run_server(args.port, not args.no_browser)
+    run_server(args.host, args.port, not args.no_browser)
 
 
 if __name__ == "__main__":

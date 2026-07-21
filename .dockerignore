@@ -1,0 +1,16 @@
+# Local tooling and caches
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Not needed in the image
+.git/
+.gitignore
+test_random_music.py
+run.command
+README.txt
+browser.json
+fly.toml
+Dockerfile
+.dockerignore

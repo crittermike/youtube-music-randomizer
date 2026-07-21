@@ -30,5 +30,19 @@ catalog.
 HOSTING
 
 The app includes a local Python backend and does not run on GitHub Pages as-is.
-GitHub Pages can host only static files. A hosted version would need a separate
-backend or a browser-safe API implementation.
+GitHub Pages can host only static files. A hosted version needs a separate
+backend.
+
+FLY.IO DEPLOYMENT
+
+A Dockerfile and fly.toml are included. The container listens on 0.0.0.0:8080
+(via the HOST and PORT env vars) and exposes a health check at /healthz. No
+secrets are required; ytmusicapi is used unauthenticated.
+
+  fly launch --no-deploy   # first time only, to create the app
+  fly deploy               # build and release
+
+Config: primary region iad, internal port 8080, HTTPS enforced,
+shared-cpu-1x with 256 MB, machines auto-stop/start with zero kept running.
+After deploy, the app is available at https://<app-name>.fly.dev.
+
