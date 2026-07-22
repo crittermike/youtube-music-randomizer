@@ -22,10 +22,11 @@ Requires Python 3.9 or newer.
 
 HOW IT WORKS
 
-The generator samples MusicBrainz metadata across the selected year range,
-matches each recording on YouTube Music, applies the requested minimum view
-count, and keeps one song per artist. It is not a uniform sample of either
-catalog.
+The generator samples one fixed MusicBrainz candidate pool across the selected
+year range, with larger pools for higher minimum view counts. It resolves that
+pool on YouTube Music in small parallel waves, stops once the playlist is full,
+applies the requested minimum view count, and keeps one song per artist. It is
+not a uniform sample of either catalog.
 
 HOSTING
 
@@ -45,4 +46,3 @@ secrets are required; ytmusicapi is used unauthenticated.
 Config: primary region iad, internal port 8080, HTTPS enforced,
 shared-cpu-1x with 256 MB, machines auto-stop/start with zero kept running.
 After deploy, the app is available at https://<app-name>.fly.dev.
-

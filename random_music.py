@@ -11,13 +11,14 @@ import threading
 import time
 import unicodedata
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -35,6 +36,26 @@ MUSICBRAINZ_USER_AGENT = (
     f"YouTubeMusicRandomizer/{APP_VERSION} "
     "(https://github.com/crittermike/youtube-music-randomizer)"
 )
+MUSICBRAINZ_PAGE_SIZE = 100
+MUSICBRAINZ_MAX_OFFSET = 1_200
+MUSICBRAINZ_REQUEST_INTERVAL_SECONDS = 1.1
+CANDIDATE_POOL_MIN_SIZE = 200
+CANDIDATE_POOL_MAX_SIZE = 800
+MUSICBRAINZ_DISTINCT_OFFSETS = (
+    MUSICBRAINZ_MAX_OFFSET // MUSICBRAINZ_PAGE_SIZE
+) + 1
+MUSICBRAINZ_MAX_PAGES = min(
+    CANDIDATE_POOL_MAX_SIZE // MUSICBRAINZ_PAGE_SIZE,
+    MUSICBRAINZ_DISTINCT_OFFSETS,
+)
+CANDIDATES_PER_TRACK_BY_MIN_VIEWS = (
+    (0, 14),
+    (100_000, 22),
+    (1_000_000, 40),
+    (10_000_000, 50),
+)
+YOUTUBE_RESOLVER_WORKERS = 8
+YOUTUBE_RESOLUTION_WAVE_SIZE = 16
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 MAX_BODY_BYTES = 64 * 1024
 CURRENT_YEAR = datetime.now().year
@@ -223,6 +244,23 @@ def contains_avoided_term(values: Iterable[str], avoid_terms: tuple[str, ...]) -
     return any(term in combined for term in avoid_terms)
 
 
+def candidate_pool_size(requested_count: int, min_views: int) -> int:
+    candidates_per_track = CANDIDATES_PER_TRACK_BY_MIN_VIEWS[0][1]
+    for threshold, multiplier in CANDIDATES_PER_TRACK_BY_MIN_VIEWS[1:]:
+        if min_views < threshold:
+            break
+        candidates_per_track = multiplier
+
+    raw_size = max(
+        CANDIDATE_POOL_MIN_SIZE,
+        requested_count * candidates_per_track,
+    )
+    rounded_size = (
+        math.ceil(raw_size / MUSICBRAINZ_PAGE_SIZE) * MUSICBRAINZ_PAGE_SIZE
+    )
+    return min(CANDIDATE_POOL_MAX_SIZE, rounded_size)
+
+
 class MusicBrainzSampler:
     def __init__(self) -> None:
         self._last_request_at = 0.0
@@ -234,15 +272,29 @@ class MusicBrainzSampler:
         oldest_year: int,
         newest_year: int,
     ) -> tuple[list[RecordingSeed], list[int]]:
-        page_size = 40
-        page_count = min(9, max(4, math.ceil(desired / page_size)))
+        page_count = min(
+            MUSICBRAINZ_MAX_PAGES,
+            max(1, math.ceil(desired / MUSICBRAINZ_PAGE_SIZE)),
+        )
         years = self._stratified_years(page_count, oldest_year, newest_year)
         seeds: list[RecordingSeed] = []
         seen_ids: set[str] = set()
+        offsets_by_year: dict[int, list[int]] = {}
 
         for year in years:
-            offset = self._random.randrange(0, 1_201, page_size)
-            data = self._request_page(year, offset, page_size)
+            offsets = offsets_by_year.get(year)
+            if offsets is None:
+                offsets = list(
+                    range(
+                        0,
+                        MUSICBRAINZ_MAX_OFFSET + 1,
+                        MUSICBRAINZ_PAGE_SIZE,
+                    )
+                )
+                self._random.shuffle(offsets)
+                offsets_by_year[year] = offsets
+            offset = offsets.pop()
+            data = self._request_page(year, offset, MUSICBRAINZ_PAGE_SIZE)
             recordings = data.get("recordings")
             if not isinstance(recordings, list):
                 raise CatalogUnavailable(
@@ -266,8 +318,11 @@ class MusicBrainzSampler:
     ) -> list[int]:
         span = newest_year - oldest_year + 1
         if count >= span:
-            years = list(range(oldest_year, newest_year + 1))
-            self._random.shuffle(years)
+            years: list[int] = []
+            while len(years) < count:
+                cycle = list(range(oldest_year, newest_year + 1))
+                self._random.shuffle(cycle)
+                years.extend(cycle)
             return years[:count]
 
         bucket_width = span / count
@@ -299,7 +354,11 @@ class MusicBrainzSampler:
 
         last_error: Exception | None = None
         for attempt in range(3):
-            wait_seconds = max(0.0, 1.1 - (time.monotonic() - self._last_request_at))
+            wait_seconds = max(
+                0.0,
+                MUSICBRAINZ_REQUEST_INTERVAL_SECONDS
+                - (time.monotonic() - self._last_request_at),
+            )
             if wait_seconds:
                 time.sleep(wait_seconds)
             try:
@@ -329,8 +388,19 @@ class MusicBrainzSampler:
 
 
 class YouTubeMusicResolver:
-    def __init__(self) -> None:
-        self.client = YTMusic()
+    def __init__(
+        self,
+        client_factory: Callable[[], YTMusic] | None = None,
+    ) -> None:
+        self._client_factory = client_factory or YTMusic
+        self._thread_clients = threading.local()
+
+    def _client(self) -> YTMusic:
+        client = getattr(self._thread_clients, "client", None)
+        if client is None:
+            client = self._client_factory()
+            self._thread_clients.client = client
+        return client
 
     def resolve(
         self,
@@ -341,7 +411,8 @@ class YouTubeMusicResolver:
         if contains_avoided_term((seed.title, seed.artist), avoid_terms):
             return None
 
-        results = self.client.search(
+        client = self._client()
+        results = client.search(
             f"{seed.artist} {seed.title}",
             filter="songs",
             limit=8,
@@ -381,7 +452,7 @@ class YouTubeMusicResolver:
             if approximate_views is not None and approximate_views < min_views:
                 continue
 
-            song = self.client.get_song(str(result["videoId"]))
+            song = client.get_song(str(result["videoId"]))
             details = song.get("videoDetails") or {}
             playability = song.get("playabilityStatus") or {}
             if playability.get("status") != "OK":
@@ -426,9 +497,25 @@ class YouTubeMusicResolver:
 
 
 class DiscoveryEngine:
+    def __init__(
+        self,
+        sampler: MusicBrainzSampler | None = None,
+        resolver: YouTubeMusicResolver | None = None,
+        resolver_workers: int = YOUTUBE_RESOLVER_WORKERS,
+        resolution_wave_size: int = YOUTUBE_RESOLUTION_WAVE_SIZE,
+    ) -> None:
+        if resolver_workers < 1:
+            raise ValueError("resolver_workers must be at least 1.")
+        if resolution_wave_size < 1:
+            raise ValueError("resolution_wave_size must be at least 1.")
+        self._sampler = sampler
+        self._resolver = resolver
+        self._resolver_workers = resolver_workers
+        self._resolution_wave_size = resolution_wave_size
+
     def generate(self, config: DiscoveryConfig) -> dict[str, Any]:
-        desired_seed_count = max(100, config.count * 14)
-        sampler = MusicBrainzSampler()
+        desired_seed_count = candidate_pool_size(config.count, config.min_views)
+        sampler = self._sampler or MusicBrainzSampler()
         seeds, sampled_years = sampler.sample(
             desired_seed_count,
             config.oldest_year,
@@ -439,25 +526,59 @@ class DiscoveryEngine:
                 "MusicBrainz did not return recordings for that year range."
             )
 
-        resolver = YouTubeMusicResolver()
+        resolver = self._resolver or YouTubeMusicResolver()
         tracks: list[Track] = []
         seen_video_ids: set[str] = set()
         seen_artists: set[str] = set()
         examined = 0
 
-        for seed in seeds:
-            if len(tracks) >= config.count:
-                break
-            examined += 1
-            track = resolver.resolve(seed, config.min_views, config.avoid_terms)
-            if track is None or track.video_id in seen_video_ids:
-                continue
-            artist_key = normalize_text(track.artist)
-            if artist_key in seen_artists:
-                continue
-            seen_video_ids.add(track.video_id)
-            seen_artists.add(artist_key)
-            tracks.append(track)
+        with ThreadPoolExecutor(
+            max_workers=self._resolver_workers,
+            thread_name_prefix="ytmusic-resolver",
+        ) as executor:
+            for wave_start in range(0, len(seeds), self._resolution_wave_size):
+                if len(tracks) >= config.count:
+                    break
+                wave = seeds[
+                    wave_start : wave_start + self._resolution_wave_size
+                ]
+                futures = [
+                    executor.submit(
+                        resolver.resolve,
+                        seed,
+                        config.min_views,
+                        config.avoid_terms,
+                    )
+                    for seed in wave
+                ]
+                examined += len(wave)
+
+                wave_results: list[Track | None] = []
+                worker_errors: list[Exception] = []
+                for future in futures:
+                    try:
+                        wave_results.append(future.result())
+                    except Exception as exc:
+                        worker_errors.append(exc)
+                if worker_errors:
+                    for additional_error in worker_errors[1:]:
+                        print(
+                            "Additional YouTube lookup failure: "
+                            f"{additional_error!r}"
+                        )
+                    raise worker_errors[0]
+
+                for track in wave_results:
+                    if len(tracks) >= config.count:
+                        break
+                    if track is None or track.video_id in seen_video_ids:
+                        continue
+                    artist_key = normalize_text(track.artist)
+                    if artist_key in seen_artists:
+                        continue
+                    seen_video_ids.add(track.video_id)
+                    seen_artists.add(artist_key)
+                    tracks.append(track)
 
         random.SystemRandom().shuffle(tracks)
         return {
@@ -465,7 +586,7 @@ class DiscoveryEngine:
             "requested": config.count,
             "found": len(tracks),
             "examined": examined,
-            "sampledYears": sorted(sampled_years),
+            "sampledYears": sorted(set(sampled_years)),
             "minViews": config.min_views,
         }
 
