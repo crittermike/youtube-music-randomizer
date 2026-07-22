@@ -142,12 +142,15 @@
     .track-list.visible { display: flex; }
 
     jelly-card.track {
-      display: flex;
+      display: block;
       width: 100%;
-      align-items: center;
-      gap: 14px;
       --jelly-card-padding-block: 10px;
       --jelly-card-padding-inline: 12px;
+    }
+    .track-inner {
+      display: flex;
+      align-items: center;
+      gap: 14px;
     }
     .track-main {
       flex: 1;
@@ -429,6 +432,7 @@
       trackList.replaceChildren();
       state.tracks.forEach((track, index) => {
         const card = makeElement("jelly-card", "track");
+        const inner = makeElement("div", "track-inner");
 
         const link = makeElement("a", "track-main");
         link.href = track.url;
@@ -465,7 +469,8 @@
           updateResultsMeta();
         });
 
-        card.append(link, remove);
+        inner.append(link, remove);
+        card.append(inner);
         trackList.append(card);
       });
 
