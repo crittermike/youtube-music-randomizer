@@ -13,6 +13,8 @@
       --muted: #6c6c70;
       --border: #e7e7e4;
       --thumb-bg: #e2e2df;
+      --panel: #ffffff;
+      --shadow: 0 1px 2px rgba(15, 15, 20, 0.05), 0 12px 34px rgba(15, 15, 20, 0.07);
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -21,6 +23,8 @@
         --muted: #9a9a9f;
         --border: #2b2b2f;
         --thumb-bg: #26262a;
+        --panel: #1b1b1e;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
       }
     }
 
@@ -36,9 +40,14 @@
     }
 
     .shell {
-      max-width: 960px;
+      max-width: 500px;
       margin: 0 auto;
-      padding: 44px 24px 40px;
+      padding: 60px 24px 40px;
+      transition: max-width 0.28s ease;
+    }
+    body.has-output .shell {
+      max-width: 980px;
+      padding-top: 44px;
     }
 
     .app-header h1 {
@@ -58,19 +67,36 @@
 
     .app {
       display: grid;
-      grid-template-columns: 290px 1fr;
+      grid-template-columns: 1fr;
       gap: 40px;
-      margin-top: 30px;
+      margin-top: 28px;
       align-items: start;
+    }
+    body.has-output .app {
+      grid-template-columns: 300px minmax(0, 1fr);
     }
 
     .controls {
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      gap: 16px;
+      padding: 22px 22px 24px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    body.has-output .controls {
       position: sticky;
       top: 24px;
     }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    body.has-output .field-row { grid-template-columns: 1fr; }
 
     .field { display: flex; flex-direction: column; gap: 7px; }
     .field-head {
@@ -90,7 +116,8 @@
 
     .hint { margin: 1px 0 0; font-size: 0.8rem; color: var(--muted); }
 
-    .results { min-height: 220px; }
+    .results { display: none; min-height: 220px; }
+    body.has-output .results { display: block; }
 
     .results-bar {
       display: flex;
@@ -106,9 +133,6 @@
 
     .results-actions { display: none; gap: 8px; flex-wrap: wrap; }
     .results-actions.visible { display: flex; }
-
-    .empty-state { color: var(--muted); padding: 24px 0; }
-    .empty-state p { margin: 0; }
 
     .working { display: none; align-items: center; gap: 14px; padding: 18px 0; color: var(--muted); }
     .working.visible { display: flex; }
@@ -199,9 +223,10 @@
     .site-footer a:hover { color: var(--text); }
 
     @media (max-width: 720px) {
-      .shell { padding: 28px 16px 32px; }
-      .app { grid-template-columns: 1fr; gap: 26px; }
-      .controls { position: static; }
+      .shell, body.has-output .shell { padding: 28px 16px 32px; max-width: 100%; }
+      .app, body.has-output .app { grid-template-columns: 1fr; gap: 22px; }
+      .controls, body.has-output .controls { position: static; }
+      .field-row { grid-template-columns: 1fr 1fr; }
       .results { min-height: 0; }
       .results-bar { flex-wrap: wrap; }
     }
@@ -221,13 +246,15 @@
 
       <div class="app">
         <form class="controls" id="generatorForm">
-          <div class="field">
-            <jelly-label for="count">Songs</jelly-label>
-            <jelly-input id="count" name="count" type="number" value="15"></jelly-input>
-          </div>
-          <div class="field">
-            <jelly-label for="minViews">Minimum views</jelly-label>
-            <jelly-input id="minViews" name="minViews" type="number" value="10000"></jelly-input>
+          <div class="field-row">
+            <div class="field">
+              <jelly-label for="count">Songs</jelly-label>
+              <jelly-input id="count" name="count" type="number" value="15"></jelly-input>
+            </div>
+            <div class="field">
+              <jelly-label for="minViews">Minimum views</jelly-label>
+              <jelly-input id="minViews" name="minViews" type="number" value="10000"></jelly-input>
+            </div>
           </div>
           <div class="field">
             <div class="field-head">
@@ -253,10 +280,6 @@
               <jelly-button id="shuffleButton" type="button" variant="platinum" size="small">Shuffle</jelly-button>
               <jelly-button id="copyButton" type="button" variant="platinum" size="small">Copy</jelly-button>
             </div>
-          </div>
-
-          <div class="empty-state" id="emptyState">
-            <p>Your playlist will appear here.</p>
           </div>
 
           <div class="working" id="workingState" aria-live="polite">
@@ -286,7 +309,6 @@
     const generateButton = document.getElementById("generateButton");
     const notice = document.getElementById("notice");
     const noticeAlert = document.getElementById("noticeAlert");
-    const emptyState = document.getElementById("emptyState");
     const workingState = document.getElementById("workingState");
     const trackList = document.getElementById("trackList");
     const resultsMeta = document.getElementById("resultsMeta");
@@ -341,12 +363,16 @@
       notice.classList.toggle("visible", Boolean(message));
     }
 
+    function updateLayout(isWorking = false) {
+      document.body.classList.toggle("has-output", isWorking || state.tracks.length > 0);
+    }
+
     function setWorking(isWorking) {
       generateButton.toggleAttribute("disabled", isWorking);
       workingState.classList.toggle("visible", isWorking);
-      emptyState.style.display = isWorking || state.tracks.length ? "none" : "block";
       trackList.classList.toggle("visible", !isWorking && state.tracks.length > 0);
       resultsActions.classList.toggle("visible", !isWorking && state.tracks.length > 0);
+      updateLayout(isWorking);
       if (isWorking) {
         updateResultsMeta();
       }
@@ -445,7 +471,7 @@
 
       resultsActions.classList.toggle("visible", state.tracks.length > 0);
       trackList.classList.toggle("visible", state.tracks.length > 0);
-      emptyState.style.display = state.tracks.length ? "none" : "block";
+      updateLayout();
     }
 
     function updateResultsMeta() {
